@@ -22,7 +22,7 @@
 
 ## Сборка и запуск
 
-Нужны Rust 1.88+, Git, C-компилятор и запущенный OpenAI-совместимый сервер. Проверяемая платформа — Linux. Для shell подагентов нужен `bubblewrap` и работающие user namespaces; небезопасного автоматического обхода нет.
+Нужны Rust 1.89+, Git, C-компилятор и запущенный OpenAI-совместимый сервер. Проверяемая платформа — Linux. Для shell подагентов нужен `bubblewrap` и работающие user namespaces; небезопасного автоматического обхода нет.
 
 ```bash
 git clone https://github.com/futureUnd1ground/aether.git

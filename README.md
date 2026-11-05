@@ -45,7 +45,7 @@ A completed assistant response is **not independent proof that a coding task suc
 
 ## Get started
 
-Requirements: **Rust 1.88+**, Git, a C compiler for bundled SQLite, and an OpenAI-compatible model server. Linux is the exercised platform. Install **bubblewrap** to run subagent shell commands; AETHER never falls back to an unrestricted shell for them.
+Requirements: **Rust 1.89+**, Git, a C compiler for bundled SQLite, and an OpenAI-compatible model server. Linux is the exercised platform. Install **bubblewrap** to run subagent shell commands; AETHER never falls back to an unrestricted shell for them.
 
 ```bash
 git clone https://github.com/futureUnd1ground/aether.git
