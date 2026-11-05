@@ -1,0 +1,8 @@
+/target
+/.aether
+*.db
+*.db-shm
+*.db-wal
+/dist
+/live-validation.json
+__pycache__/

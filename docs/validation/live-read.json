@@ -1,0 +1,109 @@
+{
+  "date": "2026-11-05",
+  "server": "LM Studio on loopback, OpenAI-compatible chat completions SSE",
+  "model": "lmstudio-community/Qwen3.5-2B-GGUF Q4_K_M",
+  "identifier": "aether-validation",
+  "context_length": 8192,
+  "gpu_offload_ratio": 0.5,
+  "session_id": "846ab7c0-8251-4c93-a669-9538f479ba37",
+  "events": [
+    {
+      "sequence": 1,
+      "kind": "operation",
+      "payload": {
+        "id": "5ca3fc16-6206-4f9a-9113-dffc7feb9969",
+        "state": "created"
+      }
+    },
+    {
+      "sequence": 2,
+      "kind": "message",
+      "payload": {
+        "content": "Use read_file to read notes.txt, then report its exact content. Do not guess the content.",
+        "role": "user"
+      }
+    },
+    {
+      "sequence": 3,
+      "kind": "usage",
+      "payload": {
+        "completion_tokens": 70,
+        "prompt_tokens": 460
+      }
+    },
+    {
+      "sequence": 4,
+      "kind": "message",
+      "payload": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"path\":\"notes.txt\"}",
+              "name": "read_file"
+            },
+            "id": "xcvdW2S0A2rRoWXwq6D7pvPaww3zKWKu",
+            "type": "function"
+          }
+        ]
+      }
+    },
+    {
+      "sequence": 5,
+      "kind": "tool_result",
+      "payload": {
+        "name": "read_file",
+        "result": {
+          "content": "AETHER_LIVE_READ_74219\n",
+          "path": "notes.txt",
+          "sha256": "0fa8a658b5751102733c262ac6565de9f4704012f32e80cb18bfc3f815217653"
+        },
+        "tool_call_id": "xcvdW2S0A2rRoWXwq6D7pvPaww3zKWKu"
+      }
+    },
+    {
+      "sequence": 6,
+      "kind": "message",
+      "payload": {
+        "content": "{\"content\":\"AETHER_LIVE_READ_74219\\n\",\"path\":\"notes.txt\",\"sha256\":\"0fa8a658b5751102733c262ac6565de9f4704012f32e80cb18bfc3f815217653\"}",
+        "role": "tool",
+        "tool_call_id": "xcvdW2S0A2rRoWXwq6D7pvPaww3zKWKu"
+      }
+    },
+    {
+      "sequence": 7,
+      "kind": "stream_chunk",
+      "payload": {
+        "step": 1,
+        "text": "The exact content of notes.txt is:\n\n```\nAETHER_LIVE_READ_74219\n```"
+      }
+    },
+    {
+      "sequence": 8,
+      "kind": "usage",
+      "payload": {
+        "completion_tokens": 108,
+        "prompt_tokens": 589
+      }
+    },
+    {
+      "sequence": 9,
+      "kind": "message",
+      "payload": {
+        "content": "The exact content of notes.txt is:\n\n```\nAETHER_LIVE_READ_74219\n```",
+        "role": "assistant"
+      }
+    },
+    {
+      "sequence": 10,
+      "kind": "operation",
+      "payload": {
+        "error": null,
+        "id": "5ca3fc16-6206-4f9a-9113-dffc7feb9969",
+        "state": "completed"
+      }
+    }
+  ],
+  "exit_code": 0
+}

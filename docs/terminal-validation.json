@@ -1,0 +1,14 @@
+{
+  "platform": "Linux",
+  "binary": "/home/future/ChatGPT/aether/target/release/aether",
+  "checks": [
+    "first frame rendered in PTY",
+    "bracketed multiline paste saved after debounce",
+    "help, narrow resize and clean shutdown",
+    "committed draft survives SIGKILL; SQLite integrity_check ok",
+    "same session reopened after abrupt process death",
+    "input/help remain usable during network streaming; Esc + shutdown preserve new draft"
+  ],
+  "result": "passed",
+  "limits": "PTY smoke/regression, not visual UX review or latency benchmark"
+}

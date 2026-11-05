@@ -1,0 +1,31 @@
+[package]
+name = "aether-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "aether"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+aether-core = { path = "../aether-core" }
+aether-storage = { path = "../aether-storage" }
+aether-providers = { path = "../aether-providers" }
+aether-agent = { path = "../aether-agent" }
+aether-tui = { path = "../aether-tui" }
+
+[dev-dependencies]
+tempfile.workspace = true

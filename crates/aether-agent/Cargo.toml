@@ -1,0 +1,23 @@
+[package]
+name = "aether-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+aether-core = { path = "../aether-core" }
+aether-storage = { path = "../aether-storage" }
+aether-providers = { path = "../aether-providers" }
+aether-tools = { path = "../aether-tools" }
+
+[dev-dependencies]
+tempfile.workspace = true
+async-trait = "0.1"
