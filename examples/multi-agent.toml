@@ -1,0 +1,51 @@
+[provider]
+base_url = "http://127.0.0.1:1234/v1"
+model = "your-loaded-model-id"
+allow_remote = false
+
+[agent]
+mode = "build"
+max_steps = 20
+context_tokens = 32768
+output_tokens = 4096
+final_response_retries = 1
+
+[permissions]
+read = "ask"
+write = "ask"
+shell = "ask"
+
+[orchestration]
+enabled = true
+max_depth = 2
+max_concurrent = 2
+max_agents = 8
+total_tokens = 131072
+total_steps = 60
+
+[profiles.focused_review]
+instructions = "Inspect the scoped source and report actionable defects with evidence. Do not modify files."
+mode = "review"
+scope = "."
+tools = ["read_file", "list_directory"]
+can_delegate = false
+max_steps = 8
+max_tokens = 20000
+context_tokens = 8192
+timeout_secs = 180
+
+[profiles.focused_review.permissions]
+read = "allow"
+write = "deny"
+shell = "deny"
+
+# Named provider example: enable only in trusted configuration, intentionally.
+# [providers.remote_review]
+# base_url = "https://your-compatible-provider.example/v1"
+# model = "your-review-model"
+# allow_remote = true
+# api_key_env = "AETHER_REVIEW_KEY"
+# input_cost_per_million = 1.0     # operator-supplied example, NOT current pricing
+# output_cost_per_million = 2.0
+# [profiles.focused_review]
+# provider = "remote_review"      # put this key in the existing profile table

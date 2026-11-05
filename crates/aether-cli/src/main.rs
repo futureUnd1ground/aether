@@ -76,6 +76,19 @@ enum Commands {
         title: String,
     },
     Models,
+    /// Inspect persisted agent trees; use --session to select a root session.
+    Agents {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export one agent's metadata and complete execution timeline.
+    Agent {
+        id: String,
+    },
+    /// Review and apply a completed isolated agent after restarting AETHER.
+    Integrate {
+        id: String,
+    },
     Doctor,
     Config {
         #[arg(long)]
@@ -136,6 +149,69 @@ async fn entry() -> Result<()> {
     let store = Store::open(dir.join("sessions.db")).await?;
     let provider = Arc::new(OpenAiCompatible::new(config.provider.clone())?);
     match cli.command {
+        Some(Commands::Agents { json }) => {
+            let records = store.agents(cli.session.as_deref()).await?;
+            let roots: std::collections::BTreeSet<_> =
+                records.iter().map(|r| r.root_session_id.clone()).collect();
+            for root in roots {
+                store.recover_agents_if_idle(&root).await?;
+            }
+            let records = store.agents(cli.session.as_deref()).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&records)?);
+            } else {
+                for r in records {
+                    println!(
+                        "{}{}  {:?}  {}  {}",
+                        "  ".repeat(r.depth),
+                        r.id,
+                        r.status,
+                        r.profile,
+                        r.task.title
+                    );
+                }
+            }
+        }
+        Some(Commands::Agent { id }) => {
+            let r = store.agent(&id).await?;
+            store.recover_agents_if_idle(&r.root_session_id).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"agent":store.agent(&id).await?,"events":store.timeline(&r.session_id).await?})
+                )?
+            );
+        }
+        Some(Commands::Integrate { id }) => {
+            let r = store.agent(&id).await?;
+            let _lease = store.lease(&r.root_session_id).await?;
+            let agent = Agent {
+                config,
+                workspace,
+                store,
+                provider,
+            };
+            let plan = agent.preview_integration(&id).await?;
+            if !io::stdin().is_terminal() {
+                bail!(
+                    "integration requires an interactive terminal to review and approve the preview"
+                );
+            }
+            eprintln!(
+                "{}\n\nApply {} file change(s)? [y/N]",
+                plan.diff,
+                plan.changes.len()
+            );
+            let cancel = CancellationToken::new();
+            if !approval(&cancel).await? {
+                bail!("integration denied");
+            }
+            agent.apply_integration(&plan, cancel).await?;
+            println!(
+                "Applied {} file change(s). Task correctness remains unverified.",
+                plan.changes.len()
+            );
+        }
         Some(Commands::Sessions { search, json }) => {
             let sessions = store.list(search).await?;
             if json {
@@ -242,6 +318,9 @@ async fn headless(agent: Agent, id: String, prompt: String, json_output: bool) -
         tokio::select! {
             _=tokio::signal::ctrl_c(),if !interrupt=>{cancel.cancel();interrupt=true;},
             event=rx.recv()=>{let Some(event)=event else{break};match event {
+                Event::AgentChanged(record)=>if json_output{println!("{}",serde_json::json!({"type":"agent","agent":record}));},
+                Event::AgentText{id,text}=>if json_output{println!("{}",serde_json::json!({"type":"agent_text","agent_id":id,"text":text}));},
+                Event::AgentActivity{id,name,detail}=>if json_output{println!("{}",serde_json::json!({"type":"agent_tool","agent_id":id,"name":name,"detail":detail}));}else{eprintln!("[agent {id} · {name}] {detail}");},
                 Event::Text(t)=>if json_output{println!("{}",serde_json::json!({"type":"text","text":t}));}else{print!("{t}");io::stdout().flush()?;},
                 Event::Permission{preview,reply}=>{
                     // JSON/noninteractive mode never reads stdin or assumes consent.

@@ -10,7 +10,7 @@ name = "aether"
 path = "src/main.rs"
 
 [dependencies]
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
 anyhow.workspace = true
 serde.workspace = true

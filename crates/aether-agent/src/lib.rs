@@ -1,15 +1,29 @@
+mod orchestrator;
+mod workspace;
 use aether_core::{Message, OperationState, Rule, Usage, config::Config, estimated_tokens};
 use aether_providers::{Delta, Provider};
 use aether_storage::Store;
 use aether_tools::Action;
 use anyhow::{Context, Result, bail};
+use orchestrator::NodeContext;
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+pub use workspace::IntegrationPlan;
 
 pub enum Event {
+    AgentChanged(Box<aether_core::agents::AgentRecord>),
+    AgentText {
+        id: String,
+        text: String,
+    },
+    AgentActivity {
+        id: String,
+        name: String,
+        detail: String,
+    },
     State(OperationState),
     Text(String),
     Usage(Usage),
@@ -25,6 +39,12 @@ pub enum Event {
         error: Option<String>,
     },
 }
+pub enum Control {
+    Cancel {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
 #[derive(Clone)]
 pub struct Agent {
     pub config: Config,
@@ -33,6 +53,69 @@ pub struct Agent {
     pub provider: Arc<dyn Provider>,
 }
 impl Agent {
+    /// Caller holds the root session lease while reviewing/applying this plan.
+    pub async fn preview_integration(&self, id: &str) -> Result<IntegrationPlan> {
+        if !self.config.agent.mode.writable() || self.config.permissions.write == Rule::Deny {
+            bail!("integration requires --mode build/debug and write permission");
+        }
+        let child = self.store.agent(id).await?;
+        let parent = self
+            .store
+            .agent(
+                child
+                    .parent_id
+                    .as_deref()
+                    .context("main agent has no parent to integrate into")?,
+            )
+            .await?;
+        if std::path::Path::new(&parent.workspace) != self.workspace {
+            bail!("open the direct parent's workspace: {}", parent.workspace);
+        }
+        let target = workspace::scoped_directory(
+            &self.workspace,
+            child
+                .integration_target
+                .as_deref()
+                .context("missing integration target")?,
+        )
+        .await?;
+        workspace::plan(&target, &child).await
+    }
+    pub async fn apply_integration(
+        &self,
+        approved: &IntegrationPlan,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let fresh = self.preview_integration(&approved.agent_id).await?;
+        if &fresh != approved {
+            bail!("agent worktree changed after approval; preview again");
+        }
+        let mut record = self.store.agent(&approved.agent_id).await?;
+        let target = std::path::Path::new(
+            record
+                .integration_target
+                .as_deref()
+                .context("missing integration target")?,
+        );
+        self.store
+            .append(
+                &record.root_session_id,
+                "integration_checkpoint",
+                serde_json::to_value(approved)?,
+            )
+            .await?;
+        let result = workspace::apply(target, approved, cancel).await;
+        record.integration = Some(
+            if result.is_ok() {
+                "applied"
+            } else {
+                "failed; inspect integration checkpoint and rollback diagnostics"
+            }
+            .into(),
+        );
+        self.store.put_agent(&record).await?;
+        result
+    }
     pub async fn run(
         &self,
         session: String,
@@ -40,7 +123,26 @@ impl Agent {
         events: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let _lease = self.store.lease(&session).await?;
+        orchestrator::run(self.clone(), session, prompt, events, cancel, None).await
+    }
+    pub async fn run_controlled(
+        &self,
+        session: String,
+        prompt: String,
+        events: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+        control: mpsc::Receiver<Control>,
+    ) -> Result<()> {
+        orchestrator::run(self.clone(), session, prompt, events, cancel, Some(control)).await
+    }
+    async fn run_inner(
+        &self,
+        session: String,
+        prompt: String,
+        events: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+        context: NodeContext,
+    ) -> Result<()> {
         let operation = Uuid::new_v4().to_string();
         self.store
             .append(
@@ -52,7 +154,7 @@ impl Agent {
         let _ = events.send(Event::State(OperationState::Running)).await;
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.agent.timeout_secs),
-            self.turn(&session, prompt, &events, &cancel),
+            self.turn(&session, prompt, &events, &cancel, &context),
         )
         .await;
         let result = match result {
@@ -84,6 +186,7 @@ impl Agent {
         prompt: String,
         events: &mpsc::Sender<Event>,
         cancel: &CancellationToken,
+        context: &NodeContext,
     ) -> Result<()> {
         self.repair_pending(session).await?;
         self.store
@@ -97,8 +200,11 @@ impl Agent {
                 self.config.agent.mode
             ),
         )];
+        messages[0].content.push_str(&context.instructions().await?);
         messages.extend(self.store.messages(session).await?);
-        let tools = aether_tools::definitions(self.config.agent.mode);
+        let tools = context.definitions(self.config.agent.mode).await?;
+        let mut recovering = false;
+        let mut recoveries = 0;
         for step in 0..self.config.agent.max_steps {
             if cancel.is_cancelled() {
                 bail!("cancelled");
@@ -115,7 +221,7 @@ impl Agent {
                 let (tx, mut rx) = mpsc::channel(32);
                 let request = self.provider.complete(
                     &messages,
-                    &tools,
+                    if recovering { &[] } else { &tools },
                     self.config.agent.output_tokens,
                     tx,
                     cancel.child_token(),
@@ -139,8 +245,41 @@ impl Agent {
             self.store
                 .append(session, "usage", serde_json::to_value(&completion.usage)?)
                 .await?;
-            if completion.text.is_empty() && completion.tools.is_empty() {
-                bail!("provider returned an empty completion");
+            self.store.append(session,"generation_finished",json!({"finish_reason":completion.finish,"tool_calls":completion.tools.len(),"has_text":!completion.text.trim().is_empty()})).await?;
+            if !completion.finish.is_complete() {
+                bail!(
+                    "incomplete generation: {:?}; no tool calls from this generation were executed",
+                    completion.finish
+                );
+            }
+            if recovering && !completion.tools.is_empty() {
+                bail!("final-response recovery returned tools; execution refused");
+            }
+            if completion.text.trim().is_empty() && completion.tools.is_empty() {
+                if recoveries >= self.config.agent.final_response_retries {
+                    bail!(
+                        "provider returned an empty final response after {recoveries} bounded recovery attempt(s); tool outcomes remain recorded, task completion is unverified"
+                    );
+                }
+                recoveries += 1;
+                recovering = true;
+                self.store
+                    .append(
+                        session,
+                        "final_response_recovery",
+                        json!({"attempt":recoveries}),
+                    )
+                    .await?;
+                send(events,Event::Tool{name:"final_response_recovery".into(),detail:format!("Empty response; requesting a final summary ({recoveries}/{}), with tools disabled",self.config.agent.final_response_retries)},cancel).await?;
+                messages.push(Message::text("user","Provide the missing final user-facing response based only on the conversation and recorded tool outcomes. Do not call tools, repeat commands, or edit files. Clearly distinguish observed results from unverified task success. If no work was done, say so."));
+                continue;
+            }
+            if completion.tools.iter().any(|call| {
+                messages
+                    .iter()
+                    .any(|m| m.tool_calls.iter().any(|old| old.id == call.id))
+            }) {
+                bail!("provider reused a tool-call ID from earlier history; execution refused");
             }
             let mut assistant = Message::text("assistant", completion.text);
             assistant.tool_calls = completion.tools.clone();
@@ -151,6 +290,13 @@ impl Agent {
             }
             for call in completion.tools {
                 let outcome = async {
+                    if let Some(result) = context
+                        .managed(&call.function.name, &call.function.arguments)
+                        .await?
+                    {
+                        return Ok(result);
+                    }
+                    context.check_tool(&call.function.name).await?;
                     let action = Action::parse(&call.function.name, &call.function.arguments)?;
                     let rule = action.rule(&self.config.permissions, self.config.agent.mode);
                     if rule == Rule::Deny {
@@ -158,7 +304,7 @@ impl Agent {
                     }
                     aether_tools::validate_scope(self.workspace.clone(), &action).await?;
                     if rule == Rule::Ask {
-                        let preview = action.preview();
+                        let preview = context.preview(&action).await?;
                         let (tx, rx) = oneshot::channel();
                         self.store
                             .append(
@@ -197,13 +343,13 @@ impl Agent {
                         // Persist original bytes before modifying. Restoration is intentionally not exposed yet.
                         let original = if expected_sha256.is_some() {
                             Some(
-                                aether_tools::execute(
-                                    self.workspace.clone(),
-                                    Action::Read { path: path.clone() },
-                                    cancel.child_token(),
-                                )
-                                .await
-                                .context("cannot persist original file before write")?,
+                                context
+                                    .execute(
+                                        Action::Read { path: path.clone() },
+                                        cancel.child_token(),
+                                    )
+                                    .await
+                                    .context("cannot persist original file before write")?,
                             )
                         } else {
                             None
@@ -225,8 +371,7 @@ impl Agent {
                         cancel,
                     )
                     .await?;
-                    aether_tools::execute(self.workspace.clone(), action, cancel.child_token())
-                        .await
+                    context.execute(action, cancel.child_token()).await
                 }
                 .await;
                 let value = match outcome {
@@ -526,5 +671,97 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("context budget"));
         consumer.await.unwrap();
+    }
+    #[tokio::test]
+    async fn empty_final_is_recovered_once_without_executing_more_tools() {
+        let (d, a, id) = setup(
+            vec![
+                call("read_file", json!({"path":"file"})),
+                Completion::default(),
+                done(),
+            ],
+            Mode::Ask,
+        )
+        .await;
+        std::fs::write(d.path().join("file"), "evidence").unwrap();
+        let (tx, rx) = mpsc::channel(64);
+        let consumer = tokio::spawn(consume(rx, false));
+        a.run(
+            id.clone(),
+            "read file and summarize".into(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        consumer.await.unwrap();
+        let history = a.store.timeline(&id).await.unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|e| e.kind == "final_response_recovery")
+                .count(),
+            1
+        );
+        assert_eq!(
+            history.iter().filter(|e| e.kind == "tool_result").count(),
+            1
+        );
+        assert!(
+            !a.store
+                .messages(&id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.role == "assistant" && m.content.is_empty() && m.tool_calls.is_empty())
+        );
+    }
+    #[tokio::test]
+    async fn repeated_empty_responses_stop_and_preserve_history() {
+        let (_d, a, id) = setup(
+            vec![Completion::default(), Completion::default()],
+            Mode::Ask,
+        )
+        .await;
+        let (tx, rx) = mpsc::channel(64);
+        let consumer = tokio::spawn(consume(rx, false));
+        assert!(
+            a.run(id.clone(), "task".into(), tx, CancellationToken::new())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("bounded recovery")
+        );
+        consumer.await.unwrap();
+        assert_eq!(
+            a.store
+                .timeline(&id)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "final_response_recovery")
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn truncated_generation_never_executes_its_tools() {
+        let mut truncated = call(
+            "write_file",
+            json!({"path":"must-not-exist","content":"bad","expected_sha256":null}),
+        );
+        truncated.finish = aether_providers::FinishReason::Length;
+        let (d, a, id) = setup(vec![truncated], Mode::Build).await;
+        let (tx, rx) = mpsc::channel(64);
+        let consumer = tokio::spawn(consume(rx, true));
+        assert!(
+            a.run(id, "task".into(), tx, CancellationToken::new())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete generation")
+        );
+        consumer.await.unwrap();
+        assert!(!d.path().join("must-not-exist").exists());
     }
 }

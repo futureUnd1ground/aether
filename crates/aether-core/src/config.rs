@@ -1,17 +1,37 @@
-use crate::{Mode, Rule};
+use crate::{
+    Mode, Rule,
+    agents::{AgentProfile, OrchestrationConfig, builtin_profiles},
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::{
     env, fs,
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub provider: ProviderConfig,
     pub agent: AgentConfig,
     pub permissions: Permissions,
+    pub orchestration: OrchestrationConfig,
+    #[serde(default = "builtin_profiles")]
+    pub profiles: BTreeMap<String, AgentProfile>,
+    pub providers: BTreeMap<String, ProviderConfig>,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            provider: ProviderConfig::default(),
+            agent: AgentConfig::default(),
+            permissions: Permissions::default(),
+            orchestration: OrchestrationConfig::default(),
+            profiles: builtin_profiles(),
+            providers: BTreeMap::new(),
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -21,6 +41,8 @@ pub struct ProviderConfig {
     pub api_key_env: String,
     pub allow_remote: bool,
     pub timeout_secs: u64,
+    pub input_cost_per_million: Option<f64>,
+    pub output_cost_per_million: Option<f64>,
 }
 impl Default for ProviderConfig {
     fn default() -> Self {
@@ -30,6 +52,8 @@ impl Default for ProviderConfig {
             api_key_env: "AETHER_API_KEY".into(),
             allow_remote: false,
             timeout_secs: 180,
+            input_cost_per_million: None,
+            output_cost_per_million: None,
         }
     }
 }
@@ -41,6 +65,7 @@ pub struct AgentConfig {
     pub context_tokens: usize,
     pub output_tokens: usize,
     pub timeout_secs: u64,
+    pub final_response_retries: usize,
 }
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -50,6 +75,7 @@ impl Default for AgentConfig {
             context_tokens: 32768,
             output_tokens: 4096,
             timeout_secs: 600,
+            final_response_retries: 1,
         }
     }
 }
@@ -88,6 +114,14 @@ impl Config {
                         .with_context(|| format!("invalid TOML: {}", path.display()))?;
                     // A checked-out repository is not authority to grant privileges.
                     if explicit.is_none() && path == workspace.join(".aether/config.toml") {
+                        if ["profiles", "providers", "orchestration"]
+                            .iter()
+                            .any(|key| overlay.get(*key).is_some())
+                        {
+                            bail!(
+                                "project configuration cannot define agent privileges, orchestration or provider routing; use trusted global config or explicit --config"
+                            );
+                        }
                         if overlay
                             .get("provider")
                             .and_then(|p| p.get("allow_remote"))
@@ -111,11 +145,14 @@ impl Config {
                             .get("provider")
                             .and_then(toml::Value::as_table)
                             .is_some_and(|p| {
-                                p.contains_key("api_key_env") || p.contains_key("base_url")
+                                p.contains_key("api_key_env")
+                                    || p.contains_key("base_url")
+                                    || p.contains_key("input_cost_per_million")
+                                    || p.contains_key("output_cost_per_million")
                             })
                         {
                             bail!(
-                                "project configuration cannot select endpoints or credential variables; use global config or explicit --config"
+                                "project configuration cannot select endpoints, credential variables or token prices; use global config or explicit --config"
                             );
                         }
                     }
@@ -158,6 +195,7 @@ impl Config {
             bail!("remote endpoints require HTTPS");
         }
         if self.provider.model.trim().is_empty()
+            || self.agent.final_response_retries > 2
             || !(1..=3600).contains(&self.provider.timeout_secs)
             || !(1..=86400).contains(&self.agent.timeout_secs)
             || self.agent.max_steps == 0
@@ -167,6 +205,72 @@ impl Config {
             || self.agent.context_tokens <= self.agent.output_tokens.saturating_add(256)
         {
             bail!("invalid model, timeout, step limit or context budget");
+        }
+        let o = &self.orchestration;
+        if o.max_depth > 8
+            || !(1..=16).contains(&o.max_concurrent)
+            || !(1..=64).contains(&o.max_agents)
+            || !(1..=1000).contains(&o.total_steps)
+            || o.total_tokens == 0
+            || o.total_tokens > 100_000_000
+        {
+            bail!("invalid orchestration depth, concurrency, agent, step or token limit");
+        }
+        if o.max_cost_usd.is_some_and(|v| !v.is_finite() || v < 0.0) {
+            bail!("invalid total cost budget");
+        }
+        let p = &self.provider;
+        if p.input_cost_per_million.is_some() != p.output_cost_per_million.is_some()
+            || [p.input_cost_per_million, p.output_cost_per_million]
+                .into_iter()
+                .flatten()
+                .any(|v| !v.is_finite() || !(0.0..=1_000_000_000.0).contains(&v))
+        {
+            bail!("provider pricing must specify both finite nonnegative input/output rates");
+        }
+        for (name, p) in &self.profiles {
+            if name.is_empty()
+                || p.instructions.len() > 32768
+                || p.scope.is_empty()
+                || p.max_steps == 0
+                || p.max_steps > 1000
+                || p.max_tokens == 0
+                || p.max_tokens > 100_000_000
+                || p.context_tokens < 1024
+                || p.context_tokens > 16_777_216
+                || !(1..=86400).contains(&p.timeout_secs)
+                || p.max_cost_usd.is_some_and(|v| !v.is_finite() || v < 0.0)
+            {
+                bail!("invalid agent profile {name}");
+            }
+            if let Some(provider) = &p.provider
+                && !self.providers.contains_key(provider)
+            {
+                bail!("profile {name} references unknown provider {provider}");
+            }
+            if p.tools.iter().any(|t| {
+                !matches!(
+                    t.as_str(),
+                    "read_file"
+                        | "list_directory"
+                        | "write_file"
+                        | "shell"
+                        | "spawn_agent"
+                        | "await_agent"
+                        | "list_agents"
+                        | "cancel_agent"
+                        | "integrate_agent"
+                )
+            }) {
+                bail!("profile {name} contains unsupported tool");
+            }
+        }
+        for p in self.providers.values() {
+            let c = Config {
+                provider: p.clone(),
+                ..Default::default()
+            };
+            c.validate()?;
         }
         Ok(())
     }
@@ -256,6 +360,7 @@ mod tests {
             "[provider]\nallow_remote=true",
             "[provider]\nbase_url='https://attacker.invalid/v1'",
             "[provider]\napi_key_env='SECRET'",
+            "[provider]\ninput_cost_per_million=0\noutput_cost_per_million=0",
         ] {
             fs::write(d.path().join(".aether/config.toml"), content).unwrap();
             assert!(Config::load(d.path(), None).is_err());

@@ -1,3 +1,4 @@
+mod agents;
 use aether_core::{Message, Session, TimelineEvent};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};
@@ -16,7 +17,7 @@ impl Store {
         };
         store.call(|c| {
             let version: i64=c.pragma_query_value(None,"user_version",|r|r.get(0))?;
-            if version>1 { bail!("database schema is newer than this AETHER version"); }
+            if version>2 { bail!("database schema is newer than this AETHER version"); }
             c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
             let tx=c.transaction()?;
             tx.execute_batch("CREATE TABLE IF NOT EXISTS sessions (
@@ -25,7 +26,13 @@ impl Store {
                 CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), kind TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_session ON events(session_id,sequence);
                 CREATE VIRTUAL TABLE IF NOT EXISTS event_search USING fts5(session_id UNINDEXED, text);
-                PRAGMA user_version=1;")?;
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY, root_id TEXT NOT NULL, parent_id TEXT REFERENCES agent_runs(id),
+                    root_session_id TEXT NOT NULL REFERENCES sessions(id), session_id TEXT NOT NULL REFERENCES sessions(id),
+                    status TEXT NOT NULL, record TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS agents_root_session ON agent_runs(root_session_id);
+                CREATE INDEX IF NOT EXISTS agents_parent ON agent_runs(parent_id);
+                PRAGMA user_version=2;")?;
             tx.commit()?; Ok(())
         }).await?;
         Ok(store)
@@ -231,5 +238,28 @@ mod tests {
             r.unwrap().unwrap();
         }
         assert_eq!(store.timeline(&s.id).await.unwrap().len(), 16);
+    }
+    #[tokio::test]
+    async fn schema_one_migration_preserves_sessions_and_events() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("s.db");
+        let store = Store::open(&path).await.unwrap();
+        let session = store.create(d.path(), "legacy", "old").await.unwrap();
+        store
+            .message(&session.id, &Message::text("user", "committed history"))
+            .await
+            .unwrap();
+        drop(store);
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch("DROP TABLE agent_runs; PRAGMA user_version=1;")
+            .unwrap();
+        drop(c);
+        let upgraded = Store::open(&path).await.unwrap();
+        assert_eq!(upgraded.get(&session.id).await.unwrap().model, "legacy");
+        assert_eq!(
+            upgraded.messages(&session.id).await.unwrap()[0].content,
+            "committed history"
+        );
+        assert!(upgraded.agents(Some(&session.id)).await.unwrap().is_empty());
     }
 }

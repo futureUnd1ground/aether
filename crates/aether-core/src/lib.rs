@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod config;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

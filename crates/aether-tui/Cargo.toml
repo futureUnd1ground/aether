@@ -13,9 +13,9 @@ tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 tracing.workspace = true
-ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
-tui-textarea = "0.7"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info", "layout-cache"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+tui-textarea = { package = "ratatui-textarea", version = "0.9.4" }
 futures-util = "0.3"
 aether-core = { path = "../aether-core" }
 aether-storage = { path = "../aether-storage" }

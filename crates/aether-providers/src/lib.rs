@@ -3,8 +3,9 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -18,9 +19,69 @@ pub struct Completion {
     pub text: String,
     pub tools: Vec<ToolCall>,
     pub usage: Usage,
+    pub finish: FinishReason,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    #[default]
+    Stop,
+    ToolCalls,
+    DoneMarker,
+    Length,
+    ContextExhausted,
+    ContentFilter,
+    Other(String),
+}
+impl FinishReason {
+    pub fn parse(reason: &str) -> Self {
+        match reason {
+            "stop" | "end_turn" | "completed" => Self::Stop,
+            "tool_calls" | "function_call" | "tool_use" => Self::ToolCalls,
+            "length" | "max_tokens" | "max_output_tokens" => Self::Length,
+            "context_length_exceeded"
+            | "model_context_window_exceeded"
+            | "context_window_exceeded" => Self::ContextExhausted,
+            "content_filter" | "refusal" => Self::ContentFilter,
+            other => Self::Other(other.into()),
+        }
+    }
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Stop | Self::ToolCalls | Self::DoneMarker)
+    }
+}
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    ContextExhausted,
+    Interrupted,
+    RateLimited,
+    Protocol,
+}
+#[derive(Debug)]
+pub struct ProviderFailure {
+    pub kind: FailureKind,
+    pub detail: String,
+}
+impl std::fmt::Display for ProviderFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "provider {:?}: {}", self.kind, self.detail)
+    }
+}
+impl std::error::Error for ProviderFailure {}
+fn failure(kind: FailureKind, detail: impl Into<String>) -> anyhow::Error {
+    ProviderFailure {
+        kind,
+        detail: detail.into(),
+    }
+    .into()
 }
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Reconfiguration is explicit; orchestration never substitutes another provider silently.
+    fn configured(&self, _config: ProviderConfig) -> Result<Arc<dyn Provider>> {
+        bail!("this provider does not support reconfiguration")
+    }
     async fn complete(
         &self,
         messages: &[Message],
@@ -76,6 +137,14 @@ impl OpenAiCompatible {
 }
 #[async_trait]
 impl Provider for OpenAiCompatible {
+    fn configured(&self, config: ProviderConfig) -> Result<Arc<dyn Provider>> {
+        let check = aether_core::config::Config {
+            provider: config.clone(),
+            ..Default::default()
+        };
+        check.validate()?;
+        Ok(Arc::new(Self::new(config)?))
+    }
     async fn complete(
         &self,
         messages: &[Message],
@@ -90,9 +159,43 @@ impl Provider for OpenAiCompatible {
         }
         let response = tokio::select! {biased; _=cancel.cancelled()=>bail!("cancelled"),r=self.request("chat/completions").json(&body).send()=>r.context("provider connection failed")?};
         if !response.status().is_success() {
+            let status = response.status();
+            if status.as_u16() == 429 {
+                return Err(failure(
+                    FailureKind::RateLimited,
+                    "HTTP 429; request was not retried",
+                ));
+            }
+            // Inspect bounded machine codes, never echo arbitrary provider error bodies.
+            if matches!(status.as_u16(), 400 | 413 | 422) {
+                let mut bytes = Vec::new();
+                let mut chunks = response.bytes_stream();
+                while let Some(chunk) = chunks.next().await {
+                    let chunk = chunk?;
+                    if bytes.len() + chunk.len() > 8192 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                    let code = v["error"]["code"]
+                        .as_str()
+                        .or_else(|| v["error"]["type"].as_str())
+                        .unwrap_or("");
+                    if FinishReason::parse(code) == FinishReason::ContextExhausted {
+                        return Err(failure(
+                            FailureKind::ContextExhausted,
+                            "server rejected context size",
+                        ));
+                    }
+                }
+                bail!(
+                    "provider HTTP {status}; check model capabilities and configuration (not retried)"
+                );
+            }
             bail!(
                 "provider HTTP {} (check endpoint, credentials and model; request was not retried)",
-                response.status()
+                status
             );
         }
         if !response
@@ -116,17 +219,26 @@ impl Provider for OpenAiCompatible {
         let mut result = Completion::default();
         let mut calls = BTreeMap::<usize, ToolCall>::new();
         let mut finished = false;
+        let mut saw_reason = false;
         let mut size = 0usize;
         loop {
             let next = tokio::select! {biased; _=cancel.cancelled()=>bail!("cancelled"),n=stream.next()=>n};
             let Some(event) = next else { break };
-            let event = event.context("invalid or interrupted SSE stream")?;
+            let event = event.map_err(|_| {
+                failure(
+                    FailureKind::Interrupted,
+                    "invalid or interrupted SSE stream",
+                )
+            })?;
             size += event.data.len();
             if size > 8 * 1024 * 1024 {
                 bail!("provider response exceeds 8 MiB limit");
             }
             if event.data == "[DONE]" {
                 finished = true;
+                if !saw_reason {
+                    result.finish = FinishReason::DoneMarker;
+                }
                 break;
             }
             let v: Value = serde_json::from_str(&event.data).context("invalid JSON in SSE data")?;
@@ -142,9 +254,8 @@ impl Provider for OpenAiCompatible {
             }
             if let Some(choice) = v["choices"].as_array().and_then(|a| a.first()) {
                 if let Some(reason) = choice["finish_reason"].as_str() {
-                    if !matches!(reason, "stop" | "tool_calls") {
-                        bail!("provider stopped with {reason}; incomplete response");
-                    }
+                    result.finish = FinishReason::parse(reason);
+                    saw_reason = true;
                     finished = true;
                 }
                 let d = &choice["delta"];
@@ -181,11 +292,17 @@ impl Provider for OpenAiCompatible {
             }
         }
         if !finished {
-            bail!("provider stream ended before a completion marker");
+            return Err(failure(
+                FailureKind::Interrupted,
+                "stream ended before a completion marker",
+            ));
         }
         result.tools = calls.into_values().collect();
         let mut ids = std::collections::HashSet::new();
         for c in &result.tools {
+            if !result.finish.is_complete() {
+                break;
+            }
             if c.id.is_empty() || c.function.name.is_empty() || !ids.insert(&c.id) {
                 bail!("invalid or duplicate tool call ID/name");
             }
@@ -345,5 +462,31 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
+    }
+    #[tokio::test]
+    async fn finish_reasons_are_preserved_not_treated_as_success() {
+        for (reason, expected) in [
+            ("stop", FinishReason::Stop),
+            ("tool_calls", FinishReason::ToolCalls),
+            ("length", FinishReason::Length),
+            (
+                "model_context_window_exceeded",
+                FinishReason::ContextExhausted,
+            ),
+            ("content_filter", FinishReason::ContentFilter),
+            (
+                "vendor_unknown",
+                FinishReason::Other("vendor_unknown".into()),
+            ),
+        ] {
+            let (p, t) = endpoint(
+                event(json!({"choices":[{"delta":{"content":"text"},"finish_reason":reason}]}))
+                    + "data: [DONE]\n\n",
+                "200 OK",
+            )
+            .await;
+            assert_eq!(complete(&p).await.unwrap().0.finish, expected);
+            t.await.unwrap();
+        }
     }
 }

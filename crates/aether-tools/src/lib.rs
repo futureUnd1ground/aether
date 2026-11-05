@@ -144,9 +144,7 @@ fn schema(name: &str, description: &str, properties: Value, required: &[&str]) -
 fn scoped(root: &Path, path: &str, new: bool) -> Result<PathBuf> {
     let supplied = Path::new(path);
     let relative = if supplied.is_absolute() {
-        supplied
-            .strip_prefix(root)
-            .context("absolute path is outside workspace; use a workspace-relative path")?
+        supplied.strip_prefix(root).map_err(|_|anyhow::anyhow!("absolute path is outside workspace {}. Use a relative path such as {} if you mean that workspace file; no outside access was granted",root.display(),supplied.file_name().unwrap_or_default().to_string_lossy()))?
     } else {
         supplied
     };
@@ -300,8 +298,111 @@ impl Drop for ProcessGroup {
         );
     }
 }
+pub async fn isolated_shell(
+    root: PathBuf,
+    command: String,
+    cancel: CancellationToken,
+) -> Result<Value> {
+    shell_command(root, command, cancel, true).await
+}
 async fn shell(root: PathBuf, command: String, cancel: CancellationToken) -> Result<Value> {
-    let mut cmd = Command::new("sh");
+    shell_command(root, command, cancel, false).await
+}
+async fn shell_command(
+    root: PathBuf,
+    command: String,
+    cancel: CancellationToken,
+    isolated: bool,
+) -> Result<Value> {
+    let mut cmd = if isolated {
+        #[cfg(not(target_os = "linux"))]
+        {
+            bail!(
+                "isolated agent shell requires Linux bubblewrap; unrestricted fallback is disabled"
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut c = Command::new("bwrap");
+            c.args([
+                "--unshare-all",
+                "--die-with-parent",
+                "--new-session",
+                "--clearenv",
+                "--ro-bind",
+                "/usr",
+                "/usr",
+                "--ro-bind-try",
+                "/bin",
+                "/bin",
+                "--ro-bind-try",
+                "/lib",
+                "/lib",
+                "--ro-bind-try",
+                "/lib64",
+                "/lib64",
+                "--ro-bind",
+                "/etc",
+                "/etc",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--dir",
+                "/tmp/home",
+                "--setenv",
+                "HOME",
+                "/tmp/home",
+                "--setenv",
+                "LANG",
+                "C.UTF-8",
+            ]);
+            let mut path = "/usr/local/bin:/usr/bin:/bin".to_owned();
+            if let Some(home) = std::env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                let rustup = home.join(".rustup");
+                let cargo = home.join(".cargo");
+                if rustup.is_dir() {
+                    c.arg("--ro-bind")
+                        .arg(&rustup)
+                        .arg(&rustup)
+                        .arg("--setenv")
+                        .arg("RUSTUP_HOME")
+                        .arg(&rustup);
+                }
+                if cargo.join("bin").is_dir() {
+                    let bin = cargo.join("bin");
+                    c.arg("--ro-bind").arg(&bin).arg(&bin);
+                    path = format!("{}:{path}", bin.display());
+                }
+                c.args([
+                    "--dir",
+                    "/tmp/cargo",
+                    "--setenv",
+                    "CARGO_HOME",
+                    "/tmp/cargo",
+                ]);
+                if cargo.join("registry").is_dir() {
+                    c.arg("--ro-bind")
+                        .arg(cargo.join("registry"))
+                        .arg("/tmp/cargo/registry");
+                }
+            }
+            c.args(["--setenv", "PATH"])
+                .arg(path)
+                .args(["--setenv", "GIT_OPTIONAL_LOCKS", "0", "--bind"])
+                .arg(&root)
+                .arg(&root)
+                .arg("--chdir")
+                .arg(&root)
+                .args(["--", "sh"]);
+            c
+        }
+    } else {
+        Command::new("sh")
+    };
     cmd.arg("-c")
         .arg(command)
         .current_dir(root)
@@ -480,5 +581,31 @@ mod tests {
         })
         .await;
         assert!(stopped.is_ok(), "shell descendant is still running");
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandbox_writes_stay_in_worktree_and_home_is_sanitized() {
+        if std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let work = d.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(d.path().join("outside"), "keep").unwrap();
+        let v=isolated_shell(work.clone(),"printf changed > inside; printf isolated > ../outside; test \"$HOME\" = /tmp/home; printf sandbox-ok".into(),CancellationToken::new()).await.unwrap();
+        assert_eq!(v["exit_code"], 0, "{v}");
+        assert_eq!(v["stdout"], "sandbox-ok");
+        assert_eq!(
+            std::fs::read_to_string(work.join("inside")).unwrap(),
+            "changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("outside")).unwrap(),
+            "keep"
+        );
     }
 }

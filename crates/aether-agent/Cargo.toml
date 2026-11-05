@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,4 +21,3 @@ aether-tools = { path = "../aether-tools" }
 
 [dev-dependencies]
 tempfile.workspace = true
-async-trait = "0.1"
