@@ -50,3 +50,27 @@ log excludes prompt bodies by design, but `RUST_LOG` can enable dependency traci
 inspect diagnostics before sharing. No at-rest encryption, secret scanner or
 retention policy exists. Abrupt death can lose the latest uncommitted stream tail.
 Windows descendant cleanup and non-Linux behavior have not been validated.
+
+## Phase 2 execution boundaries
+
+- Child permissions and tool lists are intersected with their parent's grants.
+  Read-only parents cannot launch writing profiles. Cross-endpoint remote model
+  delegation needs explicit spawn approval; there is no automatic fallback route.
+- Global and per-agent budgets reserve resources before provider execution. A finite
+  monetary limit requires operator-supplied rates. Token reservations/charges are
+  conservative when exact usage is unavailable, never represented as exact billing.
+- Subagent shell requires Linux bubblewrap, clears inherited environment, hides
+  host-home credentials, isolates networking/PIDs and only binds its scoped worktree
+  writable (plus private temporary directories). Missing isolation causes an error.
+  Cached Rust runtime/registry files can be mounted read-only for offline builds.
+- This is not a full cgroup resource sandbox or syscall allowlist. A permitted command
+  can still consume CPU/memory before its deadline; trusted runtime binaries/caches
+  and the host kernel remain dependencies. Root shell is still unrestricted.
+- Worktrees start from committed HEAD, not dirty parent state. Integration always
+  previews and asks, checks exact parent contents, records a checkpoint, and handles
+  rollback conflicts without overwriting concurrent user edits. It is atomic per
+  file, not across the whole project. Inspect checkpoints after interrupted integration.
+- Process death never replays subagents, tools, edits or shell commands. Session locks
+  prevent recovery logic from marking another live process's agents interrupted.
+- Completion recovery only asks for text with tools disabled and a finite retry count.
+  Truncated or unknown-finish generations do not execute tool calls.

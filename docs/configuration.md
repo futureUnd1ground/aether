@@ -43,3 +43,19 @@ Change `api_key_env` only in trusted config. Keys never belong in base URLs.
 AETHER_DATA_DIR overrides the data location; `RUST_LOG` controls tracing to the
 local log file. Configuration is only persisted by `config --init`, which refuses
 to overwrite existing files. Per-session model switching is not yet supported.
+
+## Multi-agent configuration
+
+See [multi-agent.md](multi-agent.md) and [the complete example](../examples/multi-agent.toml).
+`[orchestration]` controls enabled/depth/concurrency/count and task-wide token/step/cost
+caps. `[profiles.NAME]` defines independent instructions, model/provider alias, tool
+allowlist, permissions, scope and per-agent budgets. `[providers.NAME]` defines a
+trusted compatible endpoint. These sections are rejected in implicit repository
+configuration; use global config or explicit `--config` to authorize them.
+
+`agent.final_response_retries` defaults to 1 and accepts 0–2. It only recovers blank
+final text, with tools disabled; it does not retry shell, edits, truncation or network
+failures. Monetary caps require both `provider.input_cost_per_million` and
+`provider.output_cost_per_million` for every used provider. All examples are operator
+configuration, not a catalog of current prices. Model assignment never creates an
+implicit provider fallback.

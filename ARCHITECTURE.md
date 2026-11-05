@@ -40,7 +40,7 @@ with explicit unknown-outcome errors on resume; actions are never replayed.
 
 ## Storage and recovery
 
-SQLite schema version 1, WAL, synchronous FULL, foreign keys, busy timeout, a
+SQLite schema version 2 (migrating version 1 in place), WAL, synchronous FULL, foreign keys, busy timeout, a
 session/event index and FTS5 index. Each event and its search record commit in one
 transaction. Draft is stored separately. Streaming chunks commit at 4 KiB and at
 the end of a request; an abrupt kill can lose the uncommitted tail, never a committed
@@ -79,6 +79,51 @@ agent protocol, not a replacement for MCP. No compatibility claim exists today.
 
 Only OpenAI-compatible chat-completions SSE with native structured function tools.
 No Anthropic/Gemini adapters, fallback text tools, model routing, automatic context
-compaction, pricing guesses, multi-agent execution, plugins, MCP, LSP, syntax
+compaction, pricing guesses, plugins, MCP, LSP, syntax
 highlighting or claim of performance parity. Model window is configured by the
 user. Heuristic token counts cannot guarantee actual provider limits.
+
+## Phase 2: task-tree runtime
+
+`aether-core::agents` defines profiles/tasks/records/results. `aether-agent` adds a
+runtime scheduler, a budgeted provider decorator, explicit control messages, and a
+private worktree/integration module. The original agent loop/provider/tools remain
+shared by every node; there is no second simulated implementation for subagents.
+
+```mermaid
+flowchart TD
+  UI[CLI / TUI owner] -->|bounded events and control| R[Task-tree runtime]
+  R --> M[Main agent / root session]
+  R --> C[Child agents / separate sessions]
+  M --> P[Budgeted provider adapter]
+  C --> P
+  P --> S[Shared reservations + bounded execution slots]
+  S --> API[Configured provider trait]
+  C --> W[Private writing worktrees]
+  W --> I[Conflict check / preview / approval / journaled integration]
+  R --> DB[SQLite schema 2 / hierarchy + outcomes]
+```
+
+Root is depth zero. IDs correlate hierarchy, sessions and results. Token/cost/step
+reservations occur before provider calls; missing usage is charged conservatively.
+A waiting parent releases the slot. Cancellation follows the token tree; finishing
+parents cancel unfinished descendants, and the root joins workers before returning.
+Concurrent permissions queue in the presentation layer rather than replacing an
+unanswered request. A bounded control channel cancels selected live agents.
+
+Writing profiles use committed-HEAD worktrees, while read-only profiles share scope.
+The actor's file tools and subagent shell cannot silently target the parent's working
+tree. The isolated shell clears inherited environment, hides host home, isolates
+network/PID namespaces, and requires Linux bubblewrap. It does not promise cgroup
+memory/CPU/PID quotas. User-approved root shell remains unrestricted.
+
+Schema migration preserves version-1 data. On restart, only agents whose root
+session lock can be acquired are marked Interrupted; live processes are not falsely
+recovered. Historical inspection and approved retained-worktree integration do not
+need a new model request. Details and limits: docs/multi-agent.md.
+
+The TUI now uses Ratatui 0.30 and its maintained textarea fork, removing the archived
+`paste` transitive dependency instead of suppressing its advisory. The tree and
+inspector are implemented; Markdown/syntax, virtualized transcripts, plugins and
+MCP/LSP remain deferred. Earlier limitations above are superseded only where this
+section and docs/IMPLEMENTATION_STATUS.md explicitly record verified implementation.

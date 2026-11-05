@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="380" viewBox="0 0 1280 380" role="img" aria-label="AETHER — Local-first multi-agent coding in your terminal">
+<defs>
+ <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0c1220"/><stop offset="1" stop-color="#141d33"/></linearGradient>
+ <linearGradient id="ink"><stop stop-color="#7dcfff"/><stop offset="1" stop-color="#bb9af7"/></linearGradient>
+ <radialGradient id="glow"><stop stop-color="#344d91" stop-opacity=".45"/><stop offset="1" stop-color="#0c1220" stop-opacity="0"/></radialGradient>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#7dcfff" stroke-opacity=".035"/></pattern>
+</defs>
+<rect width="1280" height="380" rx="24" fill="url(#bg)"/>
+<rect width="1280" height="380" rx="24" fill="url(#grid)"/>
+<ellipse cx="1050" cy="160" rx="330" ry="260" fill="url(#glow)"/>
+<path d="M88 222L137 113L186 222M107 185H168" fill="none" stroke="url(#ink)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M131 92L137 76L143 92L159 98L143 104L137 120L131 104L115 98Z" fill="#7dcfff" opacity=".85"/>
+<text x="226" y="189" font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="76" font-weight="700" letter-spacing="12" fill="#e4edff">AETHER</text>
+<text x="231" y="231" font-family="ui-monospace,Consolas,monospace" font-size="18" letter-spacing="1.5" fill="#91a6c9">LOCAL-FIRST. MULTI-AGENT. YOUR TERMINAL.</text>
+<g stroke="#7dcfff" stroke-opacity=".33" fill="none" stroke-width="2"><path d="M1010 105V173H1120M1010 173V244H1120M900 173H1010"/><path d="M1120 105H1175M1120 244H1175"/></g>
+<g fill="#7dcfff"><circle cx="900" cy="173" r="10"/><circle cx="1010" cy="105" r="7"/><circle cx="1120" cy="173" r="7"/></g>
+<g fill="#bb9af7"><circle cx="1120" cy="105" r="7"/><circle cx="1120" cy="244" r="7"/><circle cx="1175" cy="244" r="5"/></g>
+<path d="M64 311H1216" stroke="#293b58"/>
+<text x="81" y="343" font-family="ui-monospace,Consolas,monospace" font-size="13" letter-spacing="1" fill="#7d94b8">RUST + RATATUI</text>
+<text x="420" y="343" font-family="ui-monospace,Consolas,monospace" font-size="13" letter-spacing="1" fill="#7d94b8">BOUNDED EXECUTION</text>
+<text x="851" y="343" font-family="ui-monospace,Consolas,monospace" font-size="13" letter-spacing="1" fill="#7d94b8">DURABLE AGENT TREES</text>
+</svg>

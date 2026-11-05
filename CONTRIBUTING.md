@@ -14,3 +14,9 @@ Provider fixtures are test-only, never a runtime fallback. Real inference eviden
 must be recorded separately from protocol tests. Benchmark claims need raw samples,
 hardware, application versions and the exact methodology. Security limitations
 must remain explicit until regression tests prove the boundary.
+
+Phase 2 tests require Git. The Linux sandbox regression uses bubblewrap when present;
+CI installs it explicitly. Do not bypass isolation when namespaces are unavailable.
+Optional screenshot tooling needs Pillow and pyte; it captures the actual executable
+against a persisted real-model session. Never replace those screenshots with invented
+model output or report scripted provider fixtures as live inference evidence.

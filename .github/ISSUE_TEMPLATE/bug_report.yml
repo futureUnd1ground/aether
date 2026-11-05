@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a reproducible behavior problem.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include API keys, private source, or unreviewed session exports."
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened, and what should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the minimal task, relevant redacted configuration, and actual exit codes.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: AETHER version/commit, OS, terminal, model server/model, and sandbox availability.
+    validations:
+      required: true
